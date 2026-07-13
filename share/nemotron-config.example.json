@@ -1,0 +1,13 @@
+{
+  "transcription_backend": "realtime-ws",
+  "websocket_provider": "nemotron-local",
+  "websocket_model": "onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4",
+  "realtime_mode": "transcribe",
+  "language": "pl-PL",
+  "nemotron_streaming_model": "onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4",
+  "nemotron_streaming_revision": "8364d9e2dd9da23789b480bdbba9e423717e42ee",
+  "nemotron_streaming_device": "cpu",
+  "nemotron_streaming_buffer_max_seconds": 3.0,
+  "nemotron_streaming_finalize_timeout": 5.0,
+  "nemotron_streaming_use_vad": false
+}

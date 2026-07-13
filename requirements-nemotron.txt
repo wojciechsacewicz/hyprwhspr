@@ -1,0 +1,7 @@
+# Optional local Nemotron 3.5 streaming provider.
+# Install one ORT GenAI runtime, not both:
+onnxruntime-genai==0.14.0
+# onnxruntime-genai-cuda==0.14.0
+huggingface-hub>=0.34,<2
+soxr>=0.5,<1
+numpy>=1.26
