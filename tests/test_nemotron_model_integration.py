@@ -17,7 +17,7 @@ from backends.nemotron_streaming_backend import NemotronStreamingBackend
     "set HYPRWHSPR_RUN_MODEL_TESTS=1 and provide a real speech fixture",
 )
 class NemotronModelIntegrationTests(unittest.TestCase):
-    def test_real_model_transcribes_configured_speech_fixture(self):
+    def test_real_model_streams_configured_speech_fixture(self):
         audio_path = os.environ.get("HYPRWHSPR_NEMOTRON_TEST_AUDIO")
         expected = os.environ.get("HYPRWHSPR_NEMOTRON_EXPECTED_TEXT")
         if not audio_path or not expected:
@@ -35,6 +35,7 @@ class NemotronModelIntegrationTests(unittest.TestCase):
         audio = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
         if channels > 1:
             audio = audio.reshape(-1, channels).mean(axis=1).astype(np.float32)
+        self.assertGreater(len(audio), 0)
 
         class Config:
             values = {
@@ -65,13 +66,25 @@ class NemotronModelIntegrationTests(unittest.TestCase):
             _realtime_partial_callback = None
 
         backend = NemotronStreamingBackend(Manager())
+        partials = []
+        backend.apply_partial_callback(partials.append)
         self.assertTrue(backend.initialize())
         try:
+            callback = backend.get_streaming_callback()
+            self.assertIsNotNone(callback)
+            callback.set_input_sample_rate(sample_rate)
+            for offset in range(0, len(audio), 1024):
+                callback(audio[offset:offset + 1024])
+
             transcript = backend.transcribe(
                 audio, sample_rate, Config.values["language"]
             ).lower()
             for word in expected.lower().split():
                 self.assertIn(word, transcript)
+            self.assertFalse(backend._sessions)
+            self.assertTrue(
+                any(text.strip() for text in partials) or bool(transcript)
+            )
         finally:
             backend.cleanup()
 
