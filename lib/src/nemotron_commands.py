@@ -293,10 +293,9 @@ def command_setup(args) -> int:
     try:
         device = install_dependencies(args.device)
         print(f"Runtime installed for: {device}")
-        if not args.skip_download:
-            model_path = resolve_model_path(download=True)
-            validate_model_config(model_path)
-            print(f"Model cached: {model_path}")
+        model_path = resolve_model_path(download=True)
+        validate_model_config(model_path)
+        print(f"Model cached: {model_path}")
 
         backup = update_config(
             config_file(), device=device, language=args.language
@@ -485,7 +484,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Language/locale to store; omitted preserves the current setting",
     )
-    setup.add_argument("--skip-download", action="store_true")
     setup.add_argument("--no-restart", action="store_true")
     setup.set_defaults(handler=command_setup)
 
