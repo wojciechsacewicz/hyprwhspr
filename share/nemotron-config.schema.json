@@ -2,18 +2,17 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/goodroot/hyprwhspr/main/share/nemotron-config.schema.json",
   "title": "hyprwhspr configuration with local Nemotron streaming",
-  "allOf": [
+  "oneOf": [
     {
       "$ref": "./config.schema.json"
     },
     {
       "type": "object",
+      "required": ["transcription_backend"],
       "properties": {
         "transcription_backend": {
-          "type": "string",
-          "enum": ["pywhispercpp", "cpu", "nvidia", "vulkan", "amd", "rest-api", "realtime-ws", "onnx-asr", "faster-whisper", "cohere-transcribe", "nemotron-streaming"],
-          "default": "pywhispercpp",
-          "description": "Transcription backend to use"
+          "const": "nemotron-streaming",
+          "description": "Use the first-class local Nemotron streaming backend."
         },
         "nemotron_streaming_model": {
           "type": "string",
@@ -48,7 +47,8 @@
           "default": false,
           "description": "Enable the export's bundled Silero VAD. Off by default pending push-to-talk and short-dictation benchmarks."
         }
-      }
+      },
+      "additionalProperties": true
     }
   ]
 }
