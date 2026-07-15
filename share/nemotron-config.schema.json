@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/goodroot/hyprwhspr/main/share/nemotron-config.schema.json",
+  "title": "hyprwhspr configuration with local Nemotron streaming",
+  "allOf": [
+    {
+      "$ref": "./config.schema.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "transcription_backend": {
+          "type": "string",
+          "enum": ["pywhispercpp", "cpu", "nvidia", "vulkan", "amd", "rest-api", "realtime-ws", "onnx-asr", "faster-whisper", "cohere-transcribe", "nemotron-streaming"],
+          "default": "pywhispercpp",
+          "description": "Transcription backend to use"
+        },
+        "nemotron_streaming_model": {
+          "type": "string",
+          "default": "onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4",
+          "description": "Advanced override for a compatible ONNX Runtime GenAI Nemotron export. Only the pinned default export is supported."
+        },
+        "nemotron_streaming_revision": {
+          "type": "string",
+          "default": "8364d9e2dd9da23789b480bdbba9e423717e42ee",
+          "description": "Pinned Hugging Face revision for the supported Nemotron ONNX export."
+        },
+        "nemotron_streaming_device": {
+          "type": "string",
+          "enum": ["auto", "cpu", "cuda"],
+          "default": "cpu",
+          "description": "ONNX Runtime execution provider for local Nemotron streaming."
+        },
+        "nemotron_streaming_buffer_max_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 3.0,
+          "description": "Maximum queued microphone audio before the utterance fails explicitly instead of dropping chunks."
+        },
+        "nemotron_streaming_finalize_timeout": {
+          "type": "number",
+          "minimum": 0.1,
+          "default": 5.0,
+          "description": "Maximum seconds to wait for final decoding after recording stops."
+        },
+        "nemotron_streaming_use_vad": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the export's bundled Silero VAD. Off by default pending push-to-talk and short-dictation benchmarks."
+        }
+      }
+    }
+  ]
+}
