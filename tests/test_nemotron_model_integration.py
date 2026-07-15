@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -13,17 +14,41 @@ from backends.nemotron_streaming_backend import NemotronStreamingBackend
 
 @unittest.skipUnless(
     os.environ.get("HYPRWHSPR_RUN_MODEL_TESTS") == "1",
-    "set HYPRWHSPR_RUN_MODEL_TESTS=1 to download and initialize the real model",
+    "set HYPRWHSPR_RUN_MODEL_TESTS=1 and provide a real speech fixture",
 )
 class NemotronModelIntegrationTests(unittest.TestCase):
-    def test_real_model_initializes_and_flushes_one_chunk(self):
+    def test_real_model_transcribes_configured_speech_fixture(self):
+        audio_path = os.environ.get("HYPRWHSPR_NEMOTRON_TEST_AUDIO")
+        expected = os.environ.get("HYPRWHSPR_NEMOTRON_EXPECTED_TEXT")
+        if not audio_path or not expected:
+            self.fail(
+                "set HYPRWHSPR_NEMOTRON_TEST_AUDIO and "
+                "HYPRWHSPR_NEMOTRON_EXPECTED_TEXT"
+            )
+
+        path = Path(audio_path)
+        with wave.open(str(path), "rb") as source:
+            self.assertEqual(source.getsampwidth(), 2)
+            channels = source.getnchannels()
+            sample_rate = source.getframerate()
+            frames = source.readframes(source.getnframes())
+        audio = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+        if channels > 1:
+            audio = audio.reshape(-1, channels).mean(axis=1).astype(np.float32)
+
         class Config:
             values = {
-                "nemotron_streaming_device": "cpu",
-                "language": "pl-PL",
+                "nemotron_streaming_device": os.environ.get(
+                    "HYPRWHSPR_NEMOTRON_TEST_DEVICE", "cpu"
+                ),
+                "language": os.environ.get(
+                    "HYPRWHSPR_NEMOTRON_TEST_LANGUAGE", "pl-PL"
+                ),
                 "recording_mode": "toggle",
-                "nemotron_streaming_buffer_max_seconds": 3.0,
-                "nemotron_streaming_finalize_timeout": 20.0,
+                "nemotron_streaming_buffer_max_seconds": max(
+                    3.0, len(audio) / sample_rate + 1.0
+                ),
+                "nemotron_streaming_finalize_timeout": 30.0,
                 "nemotron_streaming_use_vad": False,
             }
 
@@ -36,18 +61,17 @@ class NemotronModelIntegrationTests(unittest.TestCase):
             ready = False
             current_model = None
             _last_use_time = 0.0
+            _streaming_partial_callback = None
             _realtime_partial_callback = None
 
         backend = NemotronStreamingBackend(Manager())
         self.assertTrue(backend.initialize())
         try:
-            session = backend._new_session(
-                input_sample_rate=16000,
-                language="pl-PL",
-                publish_partials=False,
-            )
-            self.assertTrue(session.enqueue(np.zeros(8960, dtype=np.float32)))
-            self.assertEqual(session.finish(20.0), "")
+            transcript = backend.transcribe(
+                audio, sample_rate, Config.values["language"]
+            ).lower()
+            for word in expected.lower().split():
+                self.assertIn(word, transcript)
         finally:
             backend.cleanup()
 
