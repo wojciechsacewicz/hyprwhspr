@@ -70,7 +70,12 @@ class _NemotronSession:
         self._max_queued_input_samples = max(
             1, int(max_seconds * self.input_sample_rate)
         )
+        # The backend registers the session before starting the worker so a
+        # very short session cannot finish before lifecycle tracking sees it.
+
+    def start(self) -> "_NemotronSession":
         self._thread.start()
+        return self
 
     @property
     def has_audio(self) -> bool:
@@ -183,6 +188,7 @@ class _NemotronSession:
         finally:
             self._finished_at = time.monotonic()
             self._done.set()
+            self.backend._session_finished(self)
 
     def _run_stream(self) -> None:
         og = self.backend._og
