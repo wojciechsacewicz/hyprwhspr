@@ -96,21 +96,10 @@ def selected_runtime_package(device: str) -> str:
 
 def ensure_venv() -> Path:
     python = venv_python()
-    if python.is_file():
-        return python
-
-    try:
-        from backend_installer import setup_python_venv
-    except ImportError as exc:
-        raise RuntimeError(
-            "hyprwhspr virtual environment is missing and could not be "
-            "created. Run 'hyprwhspr setup' first."
-        ) from exc
-
-    setup_python_venv(force_rebuild=False)
     if not python.is_file():
         raise RuntimeError(
-            "hyprwhspr virtual environment was not created successfully"
+            "hyprwhspr virtual environment is missing. Run the normal "
+            "'hyprwhspr setup' first, then run this command again."
         )
     return python
 
