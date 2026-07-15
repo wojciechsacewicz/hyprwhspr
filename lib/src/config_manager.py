@@ -131,6 +131,13 @@ class ConfigManager:
             'realtime_buffer_max_seconds': 5,  # Max buffer before dropping chunks
             'realtime_mode': 'transcribe',      # 'transcribe' (speech-to-text) or 'converse' (voice-to-AI)
             'realtime_transcription_delay': 'low',  # gpt-realtime-whisper delay: minimal|low|medium|high|xhigh
+            # Local Nemotron streaming settings (ONNX Runtime GenAI)
+            'nemotron_streaming_model': 'onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4',
+            'nemotron_streaming_revision': '8364d9e2dd9da23789b480bdbba9e423717e42ee',
+            'nemotron_streaming_device': 'cpu',       # 'auto' | 'cpu' | 'cuda'
+            'nemotron_streaming_buffer_max_seconds': 3.0,
+            'nemotron_streaming_finalize_timeout': 5.0,
+            'nemotron_streaming_use_vad': False,
             # whisper.cpp (pywhispercpp) backend settings
             'pywhispercpp_use_vad': False,               # Native Silero VAD (strips silence, reduces hallucinations); auto-downloads ~1MB ggml-silero model when enabled
             # ONNX-ASR backend settings (CPU-optimized)
@@ -237,6 +244,16 @@ class ConfigManager:
                     loaded_config['audio_device_id'] = loaded_config['audio_device']
                     del loaded_config['audio_device']
                     migrations.append("'audio_device' -> 'audio_device_id'")
+
+                # Migrate the early feature-branch WebSocket compatibility config
+                # to the first-class local backend without touching other providers.
+                if (loaded_config.get('transcription_backend') == 'realtime-ws'
+                        and loaded_config.get('websocket_provider') == 'nemotron-local'):
+                    loaded_config['transcription_backend'] = 'nemotron-streaming'
+                    loaded_config.pop('websocket_provider', None)
+                    loaded_config.pop('websocket_model', None)
+                    loaded_config.pop('realtime_mode', None)
+                    migrations.append("legacy Nemotron WebSocket config -> 'nemotron-streaming'")
 
                 # Migrate pre-audio-feedback configs: enable audio feedback for existing users
                 # who set up before this feature existed (previously done in setup_config).
