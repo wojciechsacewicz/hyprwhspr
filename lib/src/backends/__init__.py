@@ -1,4 +1,11 @@
-"""Transcription backend registry."""
+"""
+Transcription backend classes.
+
+BACKENDS maps canonical backend names to their classes. Names missing here
+(including the pywhispercpp hardware variants 'cpu'/'nvidia'/'vulkan') fall
+back to the default pywhispercpp backend in WhisperManager. Adding a new
+backend means adding a module here and registering its class in BACKENDS.
+"""
 
 from .base import TranscriptionBackend
 from .cohere_backend import CohereBackend
@@ -20,13 +27,13 @@ BACKENDS = {
 }
 
 __all__ = [
-    "BACKENDS",
-    "TranscriptionBackend",
-    "CohereBackend",
-    "FasterWhisperBackend",
-    "NemotronStreamingBackend",
-    "OnnxAsrBackend",
-    "PywhispercppBackend",
-    "RealtimeWsBackend",
-    "RestApiBackend",
+    'BACKENDS',
+    'TranscriptionBackend',
+    'CohereBackend',
+    'FasterWhisperBackend',
+    'NemotronStreamingBackend',
+    'OnnxAsrBackend',
+    'PywhispercppBackend',
+    'RealtimeWsBackend',
+    'RestApiBackend',
 ]
