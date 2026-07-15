@@ -1,4 +1,12 @@
-"""Base class for transcription backends."""
+"""
+Base class for transcription backends.
+
+Each backend owns its model/connection state and implements initialize /
+transcribe / reinitialize / unload / cleanup. Shared manager state (config,
+ready flag, current model name, last-use timestamp) is proxied to the owning
+WhisperManager so moved code keeps reading and writing the same fields the
+facade and main.py observe.
+"""
 
 import sys
 import wave
@@ -7,30 +15,33 @@ from typing import Callable, Optional
 
 try:
     import numpy as np
-except (ImportError, ModuleNotFoundError) as exc:
+except (ImportError, ModuleNotFoundError) as e:
     print("ERROR: python-numpy is not available in this Python environment.", file=sys.stderr)
-    print(f"ImportError: {exc}", file=sys.stderr)
+    print(f"ImportError: {e}", file=sys.stderr)
     sys.exit(1)
 
 
 class TranscriptionBackend:
-    """Base class for transcription backends owned by ``WhisperManager``."""
+    """Base class for transcription backends owned by WhisperManager."""
 
-    name = ""
-    is_local = True
-    reinit_on_idle = False
-    reinit_on_resume = False
+    name = ''                 # canonical backend key, e.g. 'onnx-asr'
+    is_local = True           # False: rest-api, realtime-ws (no model lock / unload no-op)
+    reinit_on_idle = False    # long-idle (>30 min) reinit before transcribing
+    reinit_on_resume = False  # reinit after suspend/resume recovery
 
-    # Streaming capabilities are independent from transport. A local model may
-    # consume capture chunks just like a WebSocket backend without pretending to
-    # be a remote connection.
+    # Streaming is a capability, not a transport. Local models can consume
+    # capture chunks without masquerading as the realtime WebSocket backend.
     supports_streaming_capture = False
     supports_partial_transcripts = False
     requires_streaming_capture = False
-    streaming_description = "streaming backend"
+    streaming_description = 'streaming backend'
 
     def __init__(self, manager):
         self._manager = manager
+
+    # ------------------------------------------------------------------
+    # Shared manager state (write-through proxies)
+    # ------------------------------------------------------------------
 
     @property
     def config(self):
@@ -64,50 +75,54 @@ class TranscriptionBackend:
     def _last_use_time(self, value):
         self._manager._last_use_time = value
 
+    # ------------------------------------------------------------------
+    # Backend lifecycle
+    # ------------------------------------------------------------------
+
     def initialize(self) -> bool:
+        """Load the model / establish the connection. Returns success."""
         raise NotImplementedError
 
-    def transcribe(
-        self,
-        audio_data: "np.ndarray",
-        sample_rate: int = 16000,
-        language_override: Optional[str] = None,
-    ) -> str:
+    def transcribe(self, audio_data: 'np.ndarray', sample_rate: int = 16000,
+                   language_override: Optional[str] = None) -> str:
+        """Transcribe validated audio. Returns the transcript ('' on failure)."""
         raise NotImplementedError
 
     def get_streaming_callback(self) -> Optional[Callable]:
+        """Return a capture callback when streaming capture is supported."""
         return None
 
-    def apply_partial_callback(
-        self, callback: Optional[Callable[[str], None]]
-    ) -> None:
-        del callback
+    def apply_partial_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Apply a partial-transcript callback when supported."""
 
     def update_language(self, language: Optional[str]) -> None:
-        del language
+        """Apply a language override to an active streaming backend."""
 
     def close(self) -> None:
         """Close an active stream/session without necessarily unloading a model."""
 
     def reinitialize(self) -> bool:
+        """Refresh stale model/connection state (idle or suspend/resume)."""
         return True
 
     def unload(self) -> None:
-        """Release a loaded local model."""
+        """Release the loaded model to free memory (local backends)."""
 
     def cleanup(self) -> None:
         """Release resources at shutdown."""
 
     @property
     def is_loaded(self) -> bool:
+        """Whether a model/connection is currently held."""
         return False
 
-    def _resample_audio(
-        self,
-        audio_data: "np.ndarray",
-        source_rate: int,
-        target_rate: int,
-    ) -> "np.ndarray":
+    # ------------------------------------------------------------------
+    # Shared audio helpers (used by multiple backends; names preserved
+    # so code moved from WhisperManager keeps working verbatim)
+    # ------------------------------------------------------------------
+
+    def _resample_audio(self, audio_data: 'np.ndarray', source_rate: int, target_rate: int) -> 'np.ndarray':
+        """Resample float32 mono audio when a backend requires a fixed sample rate."""
         if source_rate == target_rate:
             return audio_data
         try:
@@ -121,35 +136,44 @@ class TranscriptionBackend:
                 down=int(source_rate) // divisor,
             )
             return resampled.astype(np.float32, copy=False)
-        except Exception as exc:
-            print(
-                f"[WARN] Failed to resample audio {source_rate}Hz -> "
-                f"{target_rate}Hz: {exc}",
-                flush=True,
-            )
+        except Exception as e:
+            print(f"[WARN] Failed to resample audio {source_rate}Hz -> {target_rate}Hz: {e}", flush=True)
             return audio_data
 
-    def _numpy_to_wav_bytes(
-        self, audio_data: "np.ndarray", sample_rate: int = 16000
-    ) -> bytes:
+    def _numpy_to_wav_bytes(self, audio_data: 'np.ndarray', sample_rate: int = 16000) -> bytes:
+        """
+        Convert numpy audio array to WAV format bytes (in-memory)
+
+        Args:
+            audio_data: NumPy array of audio samples (float32)
+            sample_rate: Sample rate of the audio data
+
+        Returns:
+            WAV file as bytes
+        """
         try:
+            # Ensure mono
             if audio_data.ndim != 1:
-                raise ValueError(
-                    f"Expected mono audio array, got shape {audio_data.shape}"
-                )
+                raise ValueError(f'Expected mono audio array, got shape {audio_data.shape}')
+
+            # Convert float32 to int16 for WAV format
             if audio_data.dtype == np.float32:
+                # Ensure float never expands (possible in some mic contexts)
                 audio_clipped = np.clip(audio_data, -1.0, 1.0)
                 audio_int16 = (audio_clipped * 32767).astype(np.int16)
             else:
                 audio_int16 = audio_data.astype(np.int16)
 
+            # Create WAV file in memory
             wav_buffer = BytesIO()
-            with wave.open(wav_buffer, "wb") as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
+            with wave.open(wav_buffer, 'wb') as wav_file:
+                wav_file.setnchannels(1)  # mono
+                wav_file.setsampwidth(2)  # 16-bit
                 wav_file.setframerate(sample_rate)
                 wav_file.writeframes(audio_int16.tobytes())
+
             return wav_buffer.getvalue()
-        except Exception as exc:
-            print(f"ERROR: Failed to convert audio to WAV: {exc}")
+
+        except Exception as e:
+            print(f'ERROR: Failed to convert audio to WAV: {e}')
             raise
