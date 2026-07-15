@@ -38,7 +38,11 @@ through setup, never during systemd service startup.
 
 ## Setup
 
+Complete the normal hyprwhspr setup first so the shared runtime and service
+exist, then add the optional backend:
+
 ```bash
+hyprwhspr setup
 hyprwhspr nemotron setup --device auto --language pl-PL
 ```
 
