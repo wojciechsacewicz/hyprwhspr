@@ -113,6 +113,69 @@ class NemotronCommandTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "hyprwhspr setup"):
                 commands.ensure_venv()
 
+    def test_runtime_validation_script_selects_requested_provider(self):
+        path = Path("/tmp/model")
+        cpu_script = commands._runtime_validation_script(path, "cpu")
+        cuda_script = commands._runtime_validation_script(path, "cuda")
+        self.assertIn("config.clear_providers()", cpu_script)
+        self.assertNotIn("append_provider", cpu_script)
+        self.assertIn("config.append_provider('cuda')", cuda_script)
+
+    def test_failed_runtime_switch_restores_previous_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "requirements-nemotron.txt").write_text(
+                "numpy>=1.26\n", encoding="utf-8"
+            )
+            calls = []
+
+            def fake_run(command, **kwargs):
+                parts = [str(part) for part in command]
+                calls.append(parts)
+                if ("install" in parts
+                        and "onnxruntime-genai-cuda==0.14.1" in parts):
+                    raise RuntimeError("install failed")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(commands, "ensure_venv", return_value=Path("/venv/python")), \
+                    mock.patch.object(commands, "repo_root", return_value=root), \
+                    mock.patch.object(commands, "_installed_version", return_value="0.14.0"), \
+                    mock.patch.object(commands, "_run", side_effect=fake_run):
+                with self.assertRaisesRegex(RuntimeError, "install failed"):
+                    commands.install_dependencies("cuda")
+
+            self.assertTrue(any(
+                "onnxruntime-genai-cuda" in call and "uninstall" in call
+                for call in calls
+            ))
+            self.assertTrue(any(
+                "onnxruntime-genai==0.14.0" in call and "install" in call
+                for call in calls
+            ))
+
+    def test_setup_rolls_runtime_back_before_config_activation(self):
+        args = commands.build_parser().parse_args(["setup", "--no-restart"])
+        runtime_change = (
+            "cuda",
+            "onnxruntime-genai-cuda",
+            "onnxruntime-genai",
+            "0.14.0",
+        )
+        with mock.patch.object(
+            commands, "install_dependencies", return_value=runtime_change
+        ), mock.patch.object(
+            commands, "resolve_model_path", side_effect=RuntimeError("download failed")
+        ), mock.patch.object(
+            commands, "ensure_venv", return_value=Path("/venv/python")
+        ), mock.patch.object(commands, "_restore_runtime") as restore:
+            self.assertEqual(commands.command_setup(args), 1)
+        restore.assert_called_once_with(
+            Path("/venv/python"),
+            "onnxruntime-genai-cuda",
+            "onnxruntime-genai",
+            "0.14.0",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
