@@ -58,9 +58,6 @@ hyprwhspr model unload
 hyprwhspr model reload
 ```
 
-The legacy `hyprwhspr-nemotron` wrapper remains available for compatibility,
-but the main `hyprwhspr nemotron` namespace is preferred.
-
 ## Configuration
 
 ```jsonc
@@ -103,6 +100,7 @@ Fast tests use a fake ONNX runtime and do not download model weights:
 python -m unittest tests.test_nemotron_streaming_backend
 python -m unittest tests.test_nemotron_commands
 python -m unittest tests.test_streaming_backend_capabilities
+python -m unittest tests.test_nemotron_worker_lifecycle
 ```
 
 The real-runtime test needs an actual speech fixture:
