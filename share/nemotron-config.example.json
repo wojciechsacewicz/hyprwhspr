@@ -1,8 +1,6 @@
 {
-  "transcription_backend": "realtime-ws",
-  "websocket_provider": "nemotron-local",
-  "websocket_model": "onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4",
-  "realtime_mode": "transcribe",
+  "$schema": "https://raw.githubusercontent.com/goodroot/hyprwhspr/main/share/nemotron-config.schema.json",
+  "transcription_backend": "nemotron-streaming",
   "language": "pl-PL",
   "nemotron_streaming_model": "onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4",
   "nemotron_streaming_revision": "8364d9e2dd9da23789b480bdbba9e423717e42ee",
