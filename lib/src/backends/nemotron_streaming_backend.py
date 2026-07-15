@@ -54,9 +54,10 @@ class NemotronStreamingBackend(TranscriptionBackend):
         self._model_sample_rate = 16000
         self._chunk_samples = 8960
 
-        self._session_lock = threading.Lock()
+        self._session_lock = threading.RLock()
         self._inference_lock = threading.Lock()
         self._active_session: Optional[_NemotronSession] = None
+        self._sessions: set[_NemotronSession] = set()
         self._generation = 0
         self._input_sample_rate = 16000
         self._language_override: Optional[str] = None
@@ -277,19 +278,13 @@ class NemotronStreamingBackend(TranscriptionBackend):
         return result
 
     def cancel_stream(self, timeout: float = 1.0) -> bool:
-        with self._session_lock:
-            session = self._active_session
-            self._active_session = None
-        stopped = True
-        if session is not None:
-            stopped = session.cancel(timeout=timeout)
-            if not stopped:
-                print(
-                    "[NEMOTRON] Streaming worker did not stop within "
-                    f"{timeout:.1f}s",
-                    flush=True,
-                )
-        self._clear_partial()
+        stopped = self._cancel_all_sessions(timeout)
+        if not stopped:
+            print(
+                "[NEMOTRON] One or more streaming workers did not stop within "
+                f"{timeout:.1f}s",
+                flush=True,
+            )
         return stopped
 
     def _new_session(
@@ -307,7 +302,7 @@ class NemotronStreamingBackend(TranscriptionBackend):
             if self._language_override is not None
             else self.config.get_setting("language", None)
         )
-        return _NemotronSession(
+        session = _NemotronSession(
             self,
             generation_id=self._generation,
             input_sample_rate=(
@@ -317,6 +312,28 @@ class NemotronStreamingBackend(TranscriptionBackend):
             publish_partials=publish_partials,
             buffer_max_seconds=buffer_max_seconds,
         )
+        with self._session_lock:
+            self._sessions.add(session)
+        return session.start()
+
+    def _session_finished(self, session: _NemotronSession) -> None:
+        with self._session_lock:
+            self._sessions.discard(session)
+            if self._active_session is session:
+                self._active_session = None
+
+    def _cancel_all_sessions(self, timeout: float) -> bool:
+        with self._session_lock:
+            self._active_session = None
+            sessions = list(self._sessions)
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        stopped = True
+        for session in sessions:
+            remaining = max(0.0, deadline - time.monotonic())
+            if not session.cancel(timeout=remaining):
+                stopped = False
+        self._clear_partial()
+        return stopped
 
     def _publish_partial(
         self, session: _NemotronSession, text: str
