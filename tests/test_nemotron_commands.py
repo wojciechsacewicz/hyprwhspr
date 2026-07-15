@@ -28,7 +28,7 @@ class NemotronCommandTests(unittest.TestCase):
             path.write_text(
                 json.dumps(
                     {
-                        "$schema": commands.SCHEMA_URL,
+                        "$schema": "https://raw.githubusercontent.com/goodroot/hyprwhspr/main/share/config.schema.json",
                         "primary_shortcut": "SUPER+F8",
                         "language": "de-DE",
                         "websocket_provider": "nemotron-local",
@@ -42,6 +42,7 @@ class NemotronCommandTests(unittest.TestCase):
             )
             saved = json.loads(path.read_text(encoding="utf-8"))
 
+            self.assertEqual(saved["$schema"], commands.SCHEMA_URL)
             self.assertEqual(saved["primary_shortcut"], "SUPER+F8")
             self.assertEqual(saved["language"], "de-DE")
             self.assertEqual(
@@ -104,6 +105,13 @@ class NemotronCommandTests(unittest.TestCase):
         args = commands.build_parser().parse_args(["setup"])
         self.assertIsNone(args.language)
         self.assertEqual(args.device, "auto")
+
+    def test_missing_base_runtime_is_rejected(self):
+        with mock.patch.object(
+            commands, "venv_python", return_value=Path("/missing/venv/python")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "hyprwhspr setup"):
+                commands.ensure_venv()
 
 
 if __name__ == "__main__":
