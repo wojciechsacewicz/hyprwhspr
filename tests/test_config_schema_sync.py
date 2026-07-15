@@ -13,10 +13,10 @@ from src import config_manager
 
 
 class ConfigSchemaSyncTests(unittest.TestCase):
-    """Every setting must exist in both DEFAULT_CONFIG and config.schema.json.
+    """Every setting must exist in defaults and a machine-readable schema.
 
-    The config surface is bookkept in two places (plus docs); this pins the
-    two machine-readable ones together so new settings can't ship half-registered.
+    The optional Nemotron backend extends the stable base schema instead of
+    widening its backend enum. Treat both schemas as one public config surface.
     """
 
     @classmethod
@@ -27,10 +27,19 @@ class ConfigSchemaSyncTests(unittest.TestCase):
                     mock.patch.object(config_manager, "CONFIG_FILE", cfg_dir / "config.json"):
                 manager = config_manager.ConfigManager(verbose=False)
         cls.defaults = set(manager.default_config)
+
         schema = json.loads(
             (ROOT / "share" / "config.schema.json").read_text(encoding="utf-8")
         )
         cls.schema_keys = set(schema["properties"]) - {"$schema"}
+
+        nemotron_schema = json.loads(
+            (ROOT / "share" / "nemotron-config.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        nemotron_properties = nemotron_schema["oneOf"][1]["properties"]
+        cls.schema_keys.update(nemotron_properties)
 
     def test_every_default_has_a_schema_entry(self):
         self.assertEqual(sorted(self.defaults - self.schema_keys), [])
