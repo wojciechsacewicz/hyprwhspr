@@ -112,14 +112,22 @@ def _installed_version(python: Path, package: str) -> Optional[str]:
 
 
 def _restore_runtime(
-    python: Path, selected_package: str, previous_package: str,
-    previous_version: Optional[str],
+    python: Path,
+    selected_package: str,
+    selected_version: Optional[str],
+    opposite_package: str,
+    opposite_version: Optional[str],
 ) -> None:
     pip = [python, "-m", "pip"]
     _run([*pip, "uninstall", "-y", selected_package], check=False)
-    if previous_version:
+    if selected_version:
         _run(
-            [*pip, "install", f"{previous_package}=={previous_version}"],
+            [*pip, "install", f"{selected_package}=={selected_version}"],
+            check=False,
+        )
+    elif opposite_version:
+        _run(
+            [*pip, "install", f"{opposite_package}=={opposite_version}"],
             check=False,
         )
 
@@ -136,7 +144,7 @@ def ensure_venv() -> Path:
 
 def install_dependencies(
     device: str,
-) -> tuple[str, str, str, Optional[str]]:
+) -> tuple[str, str, Optional[str], str, Optional[str]]:
     python = ensure_venv()
     resolved = resolve_device(device)
     selected = selected_runtime_package(resolved)
@@ -146,7 +154,8 @@ def install_dependencies(
         if resolved == "cpu"
         else "onnxruntime-genai"
     )
-    previous_version = _installed_version(python, opposite)
+    selected_version = _installed_version(python, selected_name)
+    opposite_version = _installed_version(python, opposite)
     requirements = repo_root() / "requirements-nemotron.txt"
     if not requirements.is_file():
         raise RuntimeError(f"missing optional requirements file: {requirements}")
@@ -157,10 +166,14 @@ def install_dependencies(
         _run([*pip, "install", selected, "-r", requirements])
     except Exception:
         _restore_runtime(
-            python, selected_name, opposite, previous_version
+            python, selected_name, selected_version,
+            opposite, opposite_version,
         )
         raise
-    return resolved, selected_name, opposite, previous_version
+    return (
+        resolved, selected_name, selected_version,
+        opposite, opposite_version,
+    )
 
 
 def _snapshot_script(model_id: str, revision: str, download: bool) -> str:
@@ -364,7 +377,10 @@ def command_setup(args) -> int:
     activated = False
     try:
         runtime_change = install_dependencies(args.device)
-        device, selected_name, opposite, previous_version = runtime_change
+        (
+            device, selected_name, selected_version,
+            opposite, opposite_version,
+        ) = runtime_change
         print(f"Runtime installed for: {device}")
         model_path = resolve_model_path(download=True)
         validate_model_config(model_path)
@@ -387,9 +403,13 @@ def command_setup(args) -> int:
         return 0
     except Exception as exc:
         if runtime_change is not None and not activated:
-            device, selected_name, opposite, previous_version = runtime_change
+            (
+                device, selected_name, selected_version,
+                opposite, opposite_version,
+            ) = runtime_change
             _restore_runtime(
-                ensure_venv(), selected_name, opposite, previous_version
+                ensure_venv(), selected_name, selected_version,
+                opposite, opposite_version,
             )
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
