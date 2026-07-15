@@ -1,4 +1,4 @@
-"""Non-blocking audio queue and isolated ONNX streaming session."""
+"""Non-blocking audio queue and isolated ONNX Nemotron streaming session."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ _FINISH = object()
 
 
 class _NemotronSession:
-    """One isolated cache/generator lifecycle for one dictated utterance."""
+    """One cache/generator lifecycle for one dictated utterance."""
 
     def __init__(
         self,
@@ -29,6 +29,7 @@ class _NemotronSession:
         input_sample_rate: int,
         language: Optional[str],
         publish_partials: bool,
+        buffer_max_seconds: Optional[float] = None,
     ):
         self.backend = backend
         self.generation_id = generation_id
@@ -39,21 +40,32 @@ class _NemotronSession:
         self._queue: "queue.Queue[object]" = queue.Queue()
         self._queue_lock = threading.Lock()
         self._queued_input_samples = 0
+        self._max_queued_input_samples_seen = 0
         self._received_input_samples = 0
+        self._processed_chunks = 0
+        self._inference_seconds = 0.0
         self._finish_requested = threading.Event()
         self._cancel_requested = threading.Event()
         self._done = threading.Event()
         self._error: Optional[str] = None
+        self._error_logged = False
         self._text = ""
         self._started_at = time.monotonic()
+        self._finished_at: Optional[float] = None
         self._thread = threading.Thread(
             target=self._run,
             name=f"hyprwhspr-nemotron-{generation_id}",
             daemon=True,
         )
 
-        max_seconds = float(
-            backend.config.get_setting("nemotron_streaming_buffer_max_seconds", 3.0)
+        max_seconds = (
+            float(buffer_max_seconds)
+            if buffer_max_seconds is not None
+            else float(
+                backend.config.get_setting(
+                    "nemotron_streaming_buffer_max_seconds", 3.0
+                )
+            )
         )
         self._max_queued_input_samples = max(
             1, int(max_seconds * self.input_sample_rate)
@@ -65,6 +77,21 @@ class _NemotronSession:
         with self._queue_lock:
             return self._received_input_samples > 0
 
+    @property
+    def is_done(self) -> bool:
+        return self._done.is_set()
+
+    @property
+    def error_message(self) -> Optional[str]:
+        return self._error
+
+    def consume_unlogged_error(self) -> Optional[str]:
+        with self._queue_lock:
+            if not self._error or self._error_logged:
+                return None
+            self._error_logged = True
+            return self._error
+
     def set_input_sample_rate(self, sample_rate: int) -> None:
         sample_rate = int(sample_rate)
         if sample_rate <= 0:
@@ -73,8 +100,8 @@ class _NemotronSession:
             if self._received_input_samples:
                 if sample_rate != self.input_sample_rate:
                     print(
-                        "[NEMOTRON] Ignoring sample-rate change after audio started "
-                        f"({self.input_sample_rate} -> {sample_rate})",
+                        "[NEMOTRON] Ignoring sample-rate change after audio "
+                        f"started ({self.input_sample_rate} -> {sample_rate})",
                         flush=True,
                     )
                 return
@@ -84,7 +111,9 @@ class _NemotronSession:
                     "nemotron_streaming_buffer_max_seconds", 3.0
                 )
             )
-            self._max_queued_input_samples = max(1, int(max_seconds * sample_rate))
+            self._max_queued_input_samples = max(
+                1, int(max_seconds * sample_rate)
+            )
 
     def enqueue(self, audio_chunk: np.ndarray) -> bool:
         if self._finish_requested.is_set() or self._cancel_requested.is_set():
@@ -96,51 +125,55 @@ class _NemotronSession:
         if not audio.flags.c_contiguous:
             audio = np.ascontiguousarray(audio, dtype=np.float32)
 
-        # AudioCapture already passes a copy. Keep this path allocation-light and
-        # never wait on inference or a bounded Queue while PortAudio holds its lock.
+        # AudioCapture already passes a copy. Never wait for inference from the
+        # PortAudio callback thread; account for queue pressure in samples.
         with self._queue_lock:
             projected = self._queued_input_samples + len(audio)
             if projected > self._max_queued_input_samples:
-                self._error = (
-                    "streaming worker fell behind "
-                    f"(buffer>{self._max_queued_input_samples / self.input_sample_rate:.1f}s)"
-                )
+                if self._error is None:
+                    self._error = (
+                        "streaming worker fell behind "
+                        f"(buffer>{self._max_queued_input_samples / self.input_sample_rate:.1f}s)"
+                    )
                 self._cancel_requested.set()
-                try:
-                    self._queue.put_nowait(_FINISH)
-                except queue.Full:
-                    pass
+                self._queue.put_nowait(_FINISH)
                 return False
             self._queued_input_samples = projected
+            self._max_queued_input_samples_seen = max(
+                self._max_queued_input_samples_seen, projected
+            )
             self._received_input_samples += len(audio)
 
         self._queue.put_nowait(audio)
         return True
 
     def finish(self, timeout: float) -> str:
+        finalize_started = time.perf_counter()
         if not self._finish_requested.is_set():
             self._finish_requested.set()
             self._queue.put_nowait(_FINISH)
 
         if not self._done.wait(timeout=max(0.1, float(timeout))):
             self._error = f"finalization timed out after {timeout:.1f}s"
-            self.cancel()
+            self.cancel(timeout=1.0)
             print(f"[NEMOTRON] {self._error}", flush=True)
             return ""
 
+        finalization_seconds = time.perf_counter() - finalize_started
         if self._error:
-            print(f"[NEMOTRON] Session failed: {self._error}", flush=True)
+            if not self._error_logged:
+                self._error_logged = True
+                print(f"[NEMOTRON] Session failed: {self._error}", flush=True)
             return ""
+
+        self._log_metrics(finalization_seconds)
         return self._text.strip()
 
-    def cancel(self) -> None:
+    def cancel(self, timeout: float = 1.0) -> bool:
         self._cancel_requested.set()
         self._finish_requested.set()
-        try:
-            self._queue.put_nowait(_FINISH)
-        except queue.Full:
-            pass
-        self._done.wait(timeout=1.0)
+        self._queue.put_nowait(_FINISH)
+        return self._done.wait(timeout=max(0.0, float(timeout)))
 
     def _run(self) -> None:
         try:
@@ -148,6 +181,7 @@ class _NemotronSession:
         except Exception as exc:
             self._error = str(exc)
         finally:
+            self._finished_at = time.monotonic()
             self._done.set()
 
     def _run_stream(self) -> None:
@@ -156,17 +190,18 @@ class _NemotronSession:
         if og is None or model is None:
             raise RuntimeError("Nemotron model is not loaded")
 
-        # AudioCapture announces the concrete device rate immediately before the
-        # first callback. Waiting for that first queue item avoids constructing a
-        # 16 kHz resampler from the temporary default before a 44.1/48 kHz device
-        # has supplied its actual rate.
+        # AudioCapture announces the concrete device rate before the first
+        # callback. Waiting for the first item avoids building a resampler for
+        # the temporary 16 kHz default when the real device is 44.1/48 kHz.
         first_item = self._queue.get()
         if first_item is _FINISH or self._cancel_requested.is_set():
             return
 
         processor = og.StreamingProcessor(model)
         use_vad = bool(
-            self.backend.config.get_setting("nemotron_streaming_use_vad", False)
+            self.backend.config.get_setting(
+                "nemotron_streaming_use_vad", False
+            )
         )
         processor.set_option("use_vad", "true" if use_vad else "false")
 
@@ -205,7 +240,9 @@ class _NemotronSession:
             if resampler is not None:
                 audio = resampler.resample_chunk(audio, last=False)
             if audio.size:
-                pending = np.concatenate((pending, audio.astype(np.float32, copy=False)))
+                pending = np.concatenate(
+                    (pending, audio.astype(np.float32, copy=False))
+                )
                 pending = self._process_complete_chunks(
                     pending, processor, generator, tokenizer_stream
                 )
@@ -219,7 +256,9 @@ class _NemotronSession:
                 np.empty(0, dtype=np.float32), last=True
             )
             if tail.size:
-                pending = np.concatenate((pending, tail.astype(np.float32, copy=False)))
+                pending = np.concatenate(
+                    (pending, tail.astype(np.float32, copy=False))
+                )
 
         pending = self._process_complete_chunks(
             pending, processor, generator, tokenizer_stream
@@ -229,22 +268,17 @@ class _NemotronSession:
                 pending, processor, generator, tokenizer_stream
             )
 
+        started = time.perf_counter()
         with self.backend._inference_lock:
             inputs = processor.flush()
             if inputs is not None:
                 generator.set_inputs(inputs)
                 self._drain_generator(generator, tokenizer_stream)
+        self._inference_seconds += time.perf_counter() - started
 
-        elapsed = time.monotonic() - self._started_at
-        audio_seconds = self._received_input_samples / max(1, self.input_sample_rate)
-        rtf = elapsed / audio_seconds if audio_seconds else 0.0
-        print(
-            f"[NEMOTRON] Finalized {audio_seconds:.2f}s audio in {elapsed:.2f}s "
-            f"(RTF={rtf:.2f})",
-            flush=True,
-        )
-
-    def _process_complete_chunks(self, pending, processor, generator, tokenizer_stream):
+    def _process_complete_chunks(
+        self, pending, processor, generator, tokenizer_stream
+    ):
         step = self.backend._chunk_samples
         while len(pending) >= step and not self._cancel_requested.is_set():
             chunk = pending[:step]
@@ -254,7 +288,10 @@ class _NemotronSession:
             )
         return pending
 
-    def _process_model_input(self, chunk, processor, generator, tokenizer_stream):
+    def _process_model_input(
+        self, chunk, processor, generator, tokenizer_stream
+    ) -> None:
+        started = time.perf_counter()
         with self.backend._inference_lock:
             inputs = processor.process(
                 np.ascontiguousarray(chunk, dtype=np.float32)
@@ -262,6 +299,8 @@ class _NemotronSession:
             if inputs is not None:
                 generator.set_inputs(inputs)
                 self._drain_generator(generator, tokenizer_stream)
+        self._inference_seconds += time.perf_counter() - started
+        self._processed_chunks += 1
 
     def _drain_generator(self, generator, tokenizer_stream) -> None:
         changed = False
@@ -277,3 +316,24 @@ class _NemotronSession:
                 changed = True
         if changed and self.publish_partials:
             self.backend._publish_partial(self, self._text.strip())
+
+    def _log_metrics(self, finalization_seconds: float) -> None:
+        audio_seconds = self._received_input_samples / max(
+            1, self.input_sample_rate
+        )
+        compute_rtf = (
+            self._inference_seconds / audio_seconds if audio_seconds else 0.0
+        )
+        queue_seconds = self._max_queued_input_samples_seen / max(
+            1, self.input_sample_rate
+        )
+        print(
+            "[NEMOTRON] "
+            f"audio={audio_seconds:.2f}s "
+            f"inference={self._inference_seconds:.2f}s "
+            f"compute_rtf={compute_rtf:.3f} "
+            f"finalize={finalization_seconds:.3f}s "
+            f"max_queue={queue_seconds:.2f}s "
+            f"chunks={self._processed_chunks}",
+            flush=True,
+        )
