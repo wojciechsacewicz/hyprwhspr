@@ -97,6 +97,33 @@ def selected_runtime_package(device: str) -> str:
     return f"onnxruntime-genai{suffix}=={ORT_GENAI_VERSION}"
 
 
+def _installed_version(python: Path, package: str) -> Optional[str]:
+    result = _run(
+        [python, "-m", "pip", "show", package],
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.lower().startswith("version:"):
+            return line.split(":", 1)[1].strip() or None
+    return None
+
+
+def _restore_runtime(
+    python: Path, selected_package: str, previous_package: str,
+    previous_version: Optional[str],
+) -> None:
+    pip = [python, "-m", "pip"]
+    _run([*pip, "uninstall", "-y", selected_package], check=False)
+    if previous_version:
+        _run(
+            [*pip, "install", f"{previous_package}=={previous_version}"],
+            check=False,
+        )
+
+
 def ensure_venv() -> Path:
     python = venv_python()
     if not python.is_file():
@@ -107,23 +134,33 @@ def ensure_venv() -> Path:
     return python
 
 
-def install_dependencies(device: str) -> str:
+def install_dependencies(
+    device: str,
+) -> tuple[str, str, str, Optional[str]]:
     python = ensure_venv()
     resolved = resolve_device(device)
     selected = selected_runtime_package(resolved)
+    selected_name = selected.split("==", 1)[0]
     opposite = (
         "onnxruntime-genai-cuda"
         if resolved == "cpu"
         else "onnxruntime-genai"
     )
+    previous_version = _installed_version(python, opposite)
     requirements = repo_root() / "requirements-nemotron.txt"
     if not requirements.is_file():
         raise RuntimeError(f"missing optional requirements file: {requirements}")
 
     pip = [python, "-m", "pip"]
     _run([*pip, "uninstall", "-y", opposite], check=False)
-    _run([*pip, "install", selected, "-r", requirements])
-    return resolved
+    try:
+        _run([*pip, "install", selected, "-r", requirements])
+    except Exception:
+        _restore_runtime(
+            python, selected_name, opposite, previous_version
+        )
+        raise
+    return resolved, selected_name, opposite, previous_version
 
 
 def _snapshot_script(model_id: str, revision: str, download: bool) -> str:
@@ -181,6 +218,39 @@ def validate_model_config(path: Path) -> dict:
             f"expected {EXPECTED_CHUNK_SAMPLES} (560 ms)"
         )
     return model
+
+
+def _runtime_validation_script(model_path: Path, device: str) -> str:
+    return (
+        "import onnxruntime_genai as og; "
+        f"config=og.Config({str(model_path)!r}); "
+        "config.clear_providers(); "
+        + (
+            "config.append_provider('cuda'); "
+            if device == "cuda"
+            else ""
+        )
+        + "model=og.Model(config); print('ok')"
+    )
+
+
+def validate_runtime_load(model_path: Path, device: str) -> None:
+    resolved = resolve_device(device)
+    result = _run(
+        [
+            ensure_venv(),
+            "-c",
+            _runtime_validation_script(model_path, resolved),
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(
+            f"ONNX Runtime could not load Nemotron on {resolved}: "
+            f"{detail or 'unknown error'}"
+        )
 
 
 def update_config(
@@ -290,16 +360,21 @@ def dependency_status() -> tuple[bool, str]:
 
 
 def command_setup(args) -> int:
+    runtime_change = None
+    activated = False
     try:
-        device = install_dependencies(args.device)
+        runtime_change = install_dependencies(args.device)
+        device, selected_name, opposite, previous_version = runtime_change
         print(f"Runtime installed for: {device}")
         model_path = resolve_model_path(download=True)
         validate_model_config(model_path)
-        print(f"Model cached: {model_path}")
+        validate_runtime_load(model_path, device)
+        print(f"Model cached and runtime-validated: {model_path}")
 
         backup = update_config(
             config_file(), device=device, language=args.language
         )
+        activated = True
         print(f"Configuration updated: {config_file()}")
         if backup:
             print(f"Backup: {backup}")
@@ -311,6 +386,11 @@ def command_setup(args) -> int:
             )
         return 0
     except Exception as exc:
+        if runtime_change is not None and not activated:
+            device, selected_name, opposite, previous_version = runtime_change
+            _restore_runtime(
+                ensure_venv(), selected_name, opposite, previous_version
+            )
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
@@ -365,8 +445,16 @@ def command_validate(_args) -> int:
     if not model_ok:
         print(f"ERROR: {model_note}", file=sys.stderr)
         return 1
+    config = _read_config()
+    device = str(config.get("nemotron_streaming_device", "cpu"))
+    try:
+        validate_runtime_load(Path(model_note), device)
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     print(f"Dependencies: ok ({deps_note})")
     print(f"Model: {model_note}")
+    print(f"Runtime: load ok ({resolve_device(device)})")
     print("Streaming chunk: 560 ms")
     return 0
 
