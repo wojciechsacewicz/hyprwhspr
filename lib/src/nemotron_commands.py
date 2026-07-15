@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install, configure, validate, and benchmark local Nemotron streaming."""
+"""Manage the optional local Nemotron 3.5 streaming backend."""
 
 from __future__ import annotations
 
@@ -20,7 +20,10 @@ ORT_GENAI_VERSION = "0.14.1"
 EXPECTED_SAMPLE_RATE = 16000
 EXPECTED_CHUNK_SAMPLES = 8960
 BACKEND_NAME = "nemotron-streaming"
-SCHEMA_URL = "https://raw.githubusercontent.com/goodroot/hyprwhspr/main/share/nemotron-config.schema.json"
+SCHEMA_URL = (
+    "https://raw.githubusercontent.com/goodroot/hyprwhspr/main/"
+    "share/nemotron-config.schema.json"
+)
 
 
 def _xdg_path(env_name: str, fallback: Path) -> Path:
@@ -49,23 +52,21 @@ def venv_python() -> Path:
 
 
 def _run(
-    command: Iterable[str],
+    command: Iterable[object],
     *,
     check: bool = True,
     capture_output: bool = False,
-    env: Optional[dict] = None,
 ):
     return subprocess.run(
         [str(part) for part in command],
         check=check,
         text=True,
         capture_output=capture_output,
-        env=env,
     )
 
 
 def resolve_device(device: str) -> str:
-    normalized = device.lower()
+    normalized = str(device).lower()
     if normalized in {"cpu", "cuda"}:
         return normalized
     if normalized != "auto":
@@ -74,13 +75,16 @@ def resolve_device(device: str) -> str:
     nvidia_smi = shutil.which("nvidia-smi")
     if not nvidia_smi:
         return "cpu"
-    result = subprocess.run(
-        [nvidia_smi, "-L"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=3,
-    )
+    try:
+        result = subprocess.run(
+            [nvidia_smi, "-L"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "cpu"
     return (
         "cuda"
         if result.returncode == 0 and "GPU" in result.stdout
@@ -89,9 +93,8 @@ def resolve_device(device: str) -> str:
 
 
 def selected_runtime_package(device: str) -> str:
-    if resolve_device(device) == "cuda":
-        return f"onnxruntime-genai-cuda=={ORT_GENAI_VERSION}"
-    return f"onnxruntime-genai=={ORT_GENAI_VERSION}"
+    suffix = "-cuda" if resolve_device(device) == "cuda" else ""
+    return f"onnxruntime-genai{suffix}=={ORT_GENAI_VERSION}"
 
 
 def ensure_venv() -> Path:
@@ -107,7 +110,7 @@ def ensure_venv() -> Path:
 def install_dependencies(device: str) -> str:
     python = ensure_venv()
     resolved = resolve_device(device)
-    runtime = selected_runtime_package(resolved)
+    selected = selected_runtime_package(resolved)
     opposite = (
         "onnxruntime-genai-cuda"
         if resolved == "cpu"
@@ -119,19 +122,16 @@ def install_dependencies(device: str) -> str:
 
     pip = [python, "-m", "pip"]
     _run([*pip, "uninstall", "-y", opposite], check=False)
-    _run([*pip, "install", runtime, "-r", requirements])
+    _run([*pip, "install", selected, "-r", requirements])
     return resolved
 
 
-def _model_path_script(
-    *, model_id: str, revision: str, download: bool
-) -> str:
-    local_flag = "False" if download else "True"
+def _snapshot_script(model_id: str, revision: str, download: bool) -> str:
     return (
         "from huggingface_hub import snapshot_download; "
         "print(snapshot_download("
         f"repo_id={model_id!r}, revision={revision!r}, "
-        f"local_files_only={local_flag}))"
+        f"local_files_only={not download!r}))"
     )
 
 
@@ -141,31 +141,28 @@ def resolve_model_path(
     model_id: str = MODEL_ID,
     revision: str = MODEL_REVISION,
 ) -> Path:
+    local_path = Path(str(model_id)).expanduser()
+    if local_path.is_dir():
+        return local_path
+
     result = _run(
-        [
-            ensure_venv(),
-            "-c",
-            _model_path_script(
-                model_id=model_id,
-                revision=revision,
-                download=download,
-            ),
-        ],
+        [ensure_venv(), "-c", _snapshot_script(model_id, revision, download)],
         capture_output=True,
     )
-    path = Path(result.stdout.strip().splitlines()[-1])
+    lines = result.stdout.strip().splitlines()
+    if not lines:
+        raise RuntimeError("model snapshot command returned no path")
+    path = Path(lines[-1])
     if not path.is_dir():
         raise RuntimeError(f"model snapshot was not resolved: {path}")
     return path
 
 
 def validate_model_config(path: Path) -> dict:
-    model_config_path = path / "genai_config.json"
-    if not model_config_path.is_file():
-        raise ValueError(f"missing {model_config_path}")
-    model = json.loads(
-        model_config_path.read_text(encoding="utf-8")
-    ).get("model") or {}
+    config_path = path / "genai_config.json"
+    if not config_path.is_file():
+        raise ValueError(f"missing {config_path}")
+    model = json.loads(config_path.read_text(encoding="utf-8")).get("model") or {}
 
     model_type = model.get("type")
     if model_type not in (None, "nemotron_speech"):
@@ -176,8 +173,7 @@ def validate_model_config(path: Path) -> dict:
     chunk_samples = int(model.get("chunk_samples", 0))
     if sample_rate != EXPECTED_SAMPLE_RATE:
         raise ValueError(
-            f"unexpected sample_rate={sample_rate}; "
-            f"expected {EXPECTED_SAMPLE_RATE}"
+            f"unexpected sample_rate={sample_rate}; expected {EXPECTED_SAMPLE_RATE}"
         )
     if chunk_samples != EXPECTED_CHUNK_SAMPLES:
         raise ValueError(
@@ -196,14 +192,16 @@ def update_config(
     revision: str = MODEL_REVISION,
 ) -> Optional[Path]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = {"$schema": SCHEMA_URL}
+    data = {}
     backup = None
     if path.exists():
         data = json.loads(path.read_text(encoding="utf-8"))
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        backup = path.with_name(f"{path.name}.bak-{stamp}")
+        backup = path.with_name(
+            f"{path.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}"
+        )
         shutil.copy2(path, backup)
 
+    data["$schema"] = SCHEMA_URL
     data.update(
         {
             "transcription_backend": BACKEND_NAME,
@@ -218,8 +216,6 @@ def update_config(
     if language is not None:
         data["language"] = language
 
-    # Remove only the legacy compatibility values previously written by this
-    # feature branch. Preserve unrelated cloud provider settings.
     if data.get("websocket_provider") == "nemotron-local":
         data.pop("websocket_provider", None)
         data.pop("websocket_model", None)
@@ -231,44 +227,6 @@ def update_config(
     )
     os.replace(temporary, path)
     return backup
-
-
-def _service(action: str, *, check: bool = False) -> bool:
-    systemctl = shutil.which("systemctl")
-    if not systemctl:
-        return False
-    result = subprocess.run(
-        [systemctl, "--user", action, "hyprwhspr.service"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if check and result.returncode != 0:
-        message = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(message or f"systemctl {action} failed")
-    return result.returncode == 0
-
-
-def dependency_status() -> tuple[bool, str]:
-    python = venv_python()
-    if not python.is_file():
-        return False, "hyprwhspr venv missing"
-    code = (
-        "import onnxruntime_genai, huggingface_hub, soxr, numpy; "
-        "print(getattr(onnxruntime_genai, '__version__', 'installed'))"
-    )
-    result = subprocess.run(
-        [python, "-c", code],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return (
-            False,
-            result.stderr.strip() or "Nemotron dependencies missing",
-        )
-    return True, result.stdout.strip()
 
 
 def _read_config() -> dict:
@@ -286,50 +244,83 @@ def _configured_model() -> tuple[str, str]:
     )
 
 
+def _service_active() -> bool:
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        return False
+    result = subprocess.run(
+        [systemctl, "--user", "is-active", "hyprwhspr.service"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def _restart_service() -> bool:
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        return False
+    return subprocess.run(
+        [systemctl, "--user", "restart", "hyprwhspr.service"],
+        check=False,
+        capture_output=True,
+        text=True,
+    ).returncode == 0
+
+
+def dependency_status() -> tuple[bool, str]:
+    python = venv_python()
+    if not python.is_file():
+        return False, "hyprwhspr venv missing"
+    result = subprocess.run(
+        [
+            python,
+            "-c",
+            "import onnxruntime_genai, huggingface_hub, soxr, numpy; "
+            "print(getattr(onnxruntime_genai, '__version__', 'installed'))",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, result.stderr.strip() or "Nemotron dependencies missing"
+    return True, result.stdout.strip()
+
+
 def command_setup(args) -> int:
     try:
         device = install_dependencies(args.device)
         print(f"Runtime installed for: {device}")
         if not args.skip_download:
-            path = resolve_model_path(
-                download=True,
-                model_id=args.model,
-                revision=args.revision,
-            )
-            validate_model_config(path)
-            print(f"Model cached: {path}")
+            model_path = resolve_model_path(download=True)
+            validate_model_config(model_path)
+            print(f"Model cached: {model_path}")
+
         backup = update_config(
-            config_file(),
-            device=device,
-            language=args.language,
-            model_id=args.model,
-            revision=args.revision,
+            config_file(), device=device, language=args.language
         )
         print(f"Configuration updated: {config_file()}")
         if backup:
             print(f"Backup: {backup}")
         if not args.no_restart:
-            if _service("restart"):
-                print("hyprwhspr.service restarted")
-            else:
-                print("Service was not restarted; start it when ready.")
+            print(
+                "hyprwhspr.service restarted"
+                if _restart_service()
+                else "Service was not restarted; start it when ready."
+            )
         return 0
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
 
-def command_download(args) -> int:
+def command_download(_args) -> int:
     try:
         model_id, revision = _configured_model()
-        if args.model:
-            model_id = args.model
-        if args.revision:
-            revision = args.revision
         path = resolve_model_path(
-            download=True,
-            model_id=model_id,
-            revision=revision,
+            download=True, model_id=model_id, revision=revision
         )
         validate_model_config(path)
         print(path)
@@ -339,61 +330,52 @@ def command_download(args) -> int:
         return 1
 
 
+def _model_status() -> tuple[bool, str]:
+    try:
+        model_id, revision = _configured_model()
+        path = resolve_model_path(
+            download=False, model_id=model_id, revision=revision
+        )
+        validate_model_config(path)
+        return True, str(path)
+    except Exception as exc:
+        return False, str(exc)
+
+
 def command_status(_args) -> int:
     config = _read_config()
     configured = config.get("transcription_backend") == BACKEND_NAME
     deps_ok, deps_note = dependency_status()
+    model_ok, model_note = _model_status()
     print(f"Configured: {'yes' if configured else 'no'}")
     print(f"Dependencies: {'ok' if deps_ok else 'missing'} ({deps_note})")
-
-    model_id, revision = _configured_model()
-    try:
-        model_path = resolve_model_path(
-            download=False,
-            model_id=model_id,
-            revision=revision,
-        )
-        validate_model_config(model_path)
-        print(f"Model: cached ({model_path})")
-        model_ok = True
-    except Exception as exc:
-        print(f"Model: missing or invalid ({exc})")
-        model_ok = False
-    print(f"Service: {'active' if _service('is-active') else 'inactive'}")
+    print(
+        f"Model: {'cached' if model_ok else 'missing or invalid'} "
+        f"({model_note})"
+    )
+    print(f"Service: {'active' if _service_active() else 'inactive'}")
     return 0 if configured and deps_ok and model_ok else 1
 
 
 def command_validate(_args) -> int:
-    ok, note = dependency_status()
-    if not ok:
-        print(f"ERROR: {note}", file=sys.stderr)
+    deps_ok, deps_note = dependency_status()
+    if not deps_ok:
+        print(f"ERROR: {deps_note}", file=sys.stderr)
         return 1
-    model_id, revision = _configured_model()
-    try:
-        path = resolve_model_path(
-            download=False,
-            model_id=model_id,
-            revision=revision,
-        )
-        model = validate_model_config(path)
-    except Exception as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+    model_ok, model_note = _model_status()
+    if not model_ok:
+        print(f"ERROR: {model_note}", file=sys.stderr)
         return 1
-    duration_ms = model["chunk_samples"] / model["sample_rate"] * 1000
-    print(f"Dependencies: ok ({note})")
-    print(f"Model: {path}")
-    print(f"Streaming chunk: {duration_ms:.0f} ms")
+    print(f"Dependencies: ok ({deps_note})")
+    print(f"Model: {model_note}")
+    print("Streaming chunk: 560 ms")
     return 0
 
 
-def _benchmark_worker(args) -> int:
-    sys.path.insert(0, str(repo_root() / "lib" / "src"))
+def _load_pcm16_wav(path: Path):
     import numpy as np
-    from backends.nemotron_streaming_backend import (
-        NemotronStreamingBackend,
-    )
 
-    with wave.open(str(args.wav), "rb") as source:
+    with wave.open(str(path), "rb") as source:
         channels = source.getnchannels()
         width = source.getsampwidth()
         sample_rate = source.getframerate()
@@ -402,10 +384,17 @@ def _benchmark_worker(args) -> int:
         raise ValueError("benchmark accepts 16-bit PCM WAV files")
     audio = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
     if channels > 1:
-        audio = (
-            audio.reshape(-1, channels).mean(axis=1).astype(np.float32)
-        )
+        audio = audio.reshape(-1, channels).mean(axis=1).astype(np.float32)
+    if not audio.size:
+        raise ValueError("benchmark WAV contains no audio")
+    return audio, sample_rate
 
+
+def _benchmark_worker(args) -> int:
+    sys.path.insert(0, str(repo_root() / "lib" / "src"))
+    from backends.nemotron_streaming_backend import NemotronStreamingBackend
+
+    audio, sample_rate = _load_pcm16_wav(args.wav)
     model_id, revision = _configured_model()
 
     class Config:
@@ -438,38 +427,42 @@ def _benchmark_worker(args) -> int:
     backend = NemotronStreamingBackend(Manager())
     if not backend.initialize():
         return 1
-    started = time.perf_counter()
-    text = backend.transcribe(audio, sample_rate, args.language)
-    elapsed = time.perf_counter() - started
-    duration = len(audio) / sample_rate
-    print(text)
-    print(
-        f"audio={duration:.2f}s wall={elapsed:.2f}s "
-        f"batch_rtf={elapsed / duration:.3f}"
-    )
-    backend.cleanup()
-    return 0 if text else 1
+    try:
+        started = time.perf_counter()
+        text = backend.transcribe(audio, sample_rate, args.language)
+        elapsed = time.perf_counter() - started
+        duration = len(audio) / sample_rate
+        print(text)
+        print(
+            f"audio={duration:.2f}s wall={elapsed:.2f}s "
+            f"batch_rtf={elapsed / duration:.3f}"
+        )
+        return 0 if text else 1
+    finally:
+        backend.cleanup()
 
 
 def command_benchmark(args) -> int:
-    python = ensure_venv()
-    if Path(sys.executable).resolve() != python.resolve():
-        command = [
-            python,
-            str(Path(__file__).resolve()),
-            "_benchmark-worker",
-            str(args.wav),
-            "--device",
-            args.device,
-            "--timeout",
-            str(args.timeout),
-        ]
-        if args.language:
-            command.extend(["--language", args.language])
-        if args.use_vad:
-            command.append("--use-vad")
-        return subprocess.run(command, check=False).returncode
     try:
+        python = ensure_venv()
+        if Path(sys.executable).resolve() != python.resolve():
+            command = [
+                python,
+                Path(__file__).resolve(),
+                "_benchmark-worker",
+                args.wav,
+                "--device",
+                args.device,
+                "--timeout",
+                args.timeout,
+            ]
+            if args.language:
+                command.extend(["--language", args.language])
+            if args.use_vad:
+                command.append("--use-vad")
+            return subprocess.run(
+                [str(part) for part in command], check=False
+            ).returncode
         return _benchmark_worker(args)
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -483,9 +476,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    setup = subparsers.add_parser(
-        "setup", help="install, download, and configure"
-    )
+    setup = subparsers.add_parser("setup", help="install, download, and configure")
     setup.add_argument(
         "--device", choices=["auto", "cpu", "cuda"], default="auto"
     )
@@ -494,22 +485,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Language/locale to store; omitted preserves the current setting",
     )
-    setup.add_argument("--model", default=MODEL_ID)
-    setup.add_argument("--revision", default=MODEL_REVISION)
     setup.add_argument("--skip-download", action="store_true")
     setup.add_argument("--no-restart", action="store_true")
     setup.set_defaults(handler=command_setup)
 
-    download = subparsers.add_parser(
-        "download", help="download the configured model"
-    )
-    download.add_argument("--model", default=None)
-    download.add_argument("--revision", default=None)
+    download = subparsers.add_parser("download", help="download the configured model")
     download.set_defaults(handler=command_download)
 
-    status = subparsers.add_parser(
-        "status", help="show configuration and cache status"
-    )
+    status = subparsers.add_parser("status", help="show configuration and cache status")
     status.set_defaults(handler=command_status)
 
     validate = subparsers.add_parser(
@@ -529,9 +512,7 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--use-vad", action="store_true")
     benchmark.set_defaults(handler=command_benchmark)
 
-    worker = subparsers.add_parser(
-        "_benchmark-worker", help=argparse.SUPPRESS
-    )
+    worker = subparsers.add_parser("_benchmark-worker", help=argparse.SUPPRESS)
     worker.add_argument("wav", type=Path)
     worker.add_argument("--device", default="auto")
     worker.add_argument("--language", default=None)
@@ -543,11 +524,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    try:
-        return int(args.handler(args))
-    except Exception as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
+    return int(args.handler(args))
 
 
 if __name__ == "__main__":
