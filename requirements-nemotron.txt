@@ -1,7 +1,5 @@
-# Optional local Nemotron 3.5 streaming provider.
-# Install one ORT GenAI runtime, not both:
-onnxruntime-genai==0.14.0
-# onnxruntime-genai-cuda==0.14.0
+# Optional dependencies shared by CPU and CUDA Nemotron installs.
+# hyprwhspr nemotron setup installs exactly one matching ORT GenAI runtime.
 huggingface-hub>=0.34,<2
 soxr>=0.5,<1
 numpy>=1.26
