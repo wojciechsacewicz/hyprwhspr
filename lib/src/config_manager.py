@@ -40,6 +40,7 @@ class ConfigManager:
     """Manages application configuration and settings"""
 
     SCHEMA_URL = "https://raw.githubusercontent.com/goodroot/hyprwhspr/main/share/config.schema.json"
+    NEMOTRON_SCHEMA_URL = "https://raw.githubusercontent.com/goodroot/hyprwhspr/main/share/nemotron-config.schema.json"
 
     def __init__(self, verbose: bool = True):
         self.verbose = verbose
@@ -206,7 +207,7 @@ class ConfigManager:
         self._load_config()
     
     def _ensure_config_dir(self):
-        """Ensure the configuration directory exists"""
+        """Ensure the config directory exists"""
         try:
             self.config_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
@@ -289,7 +290,12 @@ class ConfigManager:
     def save_config(self) -> bool:
         """Save current configuration to file (sparse: only non-default keys + $schema)"""
         try:
-            sparse = {"$schema": self.SCHEMA_URL}
+            schema_url = (
+                self.NEMOTRON_SCHEMA_URL
+                if self.config.get('transcription_backend') == 'nemotron-streaming'
+                else self.SCHEMA_URL
+            )
+            sparse = {"$schema": schema_url}
             for key, value in self.config.items():
                 if key not in self.default_config or self.default_config[key] != value:
                     sparse[key] = value
